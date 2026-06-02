@@ -14,18 +14,28 @@ def midi_to_sequence(midi_path, max_timesteps=2600):
 
     sequence = []
 
+    # Collect all notes from all instruments with their onset times
+    all_notes = []
+
     for instrument_idx, instrument in enumerate(midi.instruments[:16]):
 
         for note in instrument.notes:
 
-            row = np.zeros(FEATURES)
+            all_notes.append((note.start, instrument_idx, note))
 
-            channel = instrument_idx * 2
+    # Sort by onset time so the GRU sees chronological musical progression
+    all_notes.sort(key=lambda x: x[0])
 
-            row[channel] = note.pitch
-            row[channel + 1] = note.velocity
+    for _, instrument_idx, note in all_notes:
 
-            sequence.append(row)
+        row = np.zeros(FEATURES)
+
+        channel = instrument_idx * 2
+
+        row[channel] = note.pitch
+        row[channel + 1] = note.velocity
+
+        sequence.append(row)
 
     sequence = np.array(sequence, dtype=np.float32)
 

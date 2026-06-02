@@ -1,23 +1,17 @@
 # training/train.py
 #
-# Trains the SeER model on the Lakh MIDI + Echo Nest triplets data.
+# Trains the SeER model using the AUTHOR'S preprocessed data
+# (triplets.txt + midi_array.txt) from the SeER_Keras repository.
 #
-# Key changes from the original version:
-#   1. All logic is wrapped in a main() function behind an
-#      `if __name__ == "__main__"` guard, so importing from this
-#      module no longer triggers the full training pipeline.
-#   2. An 80/20 per-user train/test split is performed BEFORE
-#      training, so the model never sees the held-out test data.
-#   3. The fitted EncoderManager is saved to data/encoder.pkl
-#      alongside the model weights, ensuring the evaluation script
-#      uses the exact same user/song index mapping.
+# This avoids the need for raw MIDI preprocessing and ensures
+# results are directly comparable to the paper.
 #
 # Usage:
-#   python -m training.train          (from project root)
-#   python training/train.py          (also works)
+#   python -m training.train
 
 import os
 import sys
+import json
 import numpy as np
 import pandas as pd
 import torch
@@ -30,56 +24,29 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from models.seer import SeER
-from utils.encoders import EncoderManager
 
 
 # ==============================================================
 # CONSTANTS
 # ==============================================================
 
-BASE_PATH = os.path.join(os.path.dirname(__file__), "..", "data")
-DATA_PATH = os.path.abspath(BASE_PATH)
+DATA_PATH = os.path.join(ROOT_DIR, "data")
 
-TRIPLETS_PATH = os.path.join(DATA_PATH, "train_triplets.txt")
-UNIQUE_TRACKS_PATH = os.path.join(DATA_PATH, "unique_tracks.txt")
-PROCESSED_PATH = os.path.join(DATA_PATH, "processed")
-ENCODER_PATH = os.path.join(DATA_PATH, "encoder.pkl")
+TRIPLETS_PATH = os.path.join(DATA_PATH, "triplets.txt")
+MIDI_ARRAY_PATH = os.path.join(DATA_PATH, "midi_array.txt")
 
-MODEL_SAVE_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "seer_model.pth")
-)
+MODEL_SAVE_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
 
 # ==============================================================
 # HYPERPARAMETERS
 # ==============================================================
 
-BATCH_SIZE = 32
-LEARNING_RATE = 1e-4
-EPOCHS = 20
+SEQUENCE_LENGTH = 500       # median MIDI length from the paper
+BATCH_SIZE = 200              # 500 in the paper, use 32 if GPU memory is limited
+LEARNING_RATE = 1e-3
+EPOCHS = 10
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
-
-
-# ==============================================================
-# RATING CONVERSION
-# ==============================================================
-
-def playcount_to_rating(x):
-
-    if x <= 1:
-        return 1
-
-    elif x <= 2:
-        return 2
-
-    elif x <= 5:
-        return 3
-
-    elif x <= 10:
-        return 4
-
-    else:
-        return 5
 
 
 # ==============================================================
@@ -88,27 +55,27 @@ def playcount_to_rating(x):
 
 class SeERDataset(Dataset):
 
-    def __init__(self, dataframe, song_sequences):
+    def __init__(self, users, songs, ratings, midi_array, sequence_length):
 
-        self.df = dataframe.reset_index(drop=True)
-
-        self.song_sequences = song_sequences
+        self.users = users
+        self.songs = songs
+        self.ratings = ratings
+        self.midi_array = midi_array
+        self.seq_len = sequence_length
 
     def __len__(self):
-
-        return len(self.df)
+        return len(self.users)
 
     def __getitem__(self, idx):
 
-        row = self.df.iloc[idx]
+        user_idx = self.users[idx]
+        song_idx = self.songs[idx]
+        rating = self.ratings[idx]
 
-        user_idx = row['user_idx']
-
-        track_id = row['song']
-
-        rating = row['rating']
-
-        sequence = self.song_sequences[track_id]
+        # The midi_array is flattened: (num_songs, seq_len * 32)
+        # Reshape the song's row into (seq_len, 32) for the GRU
+        flat_features = self.midi_array[song_idx]
+        sequence = flat_features.reshape(self.seq_len, 32)
 
         return (
             torch.tensor(user_idx, dtype=torch.long),
@@ -124,155 +91,67 @@ class SeERDataset(Dataset):
 def main():
 
     # ----------------------------------------------------------
-    # LOAD TRIPLETS
+    # LOAD TRIPLETS (author's preprocessed format)
     # ----------------------------------------------------------
 
     print("=" * 60)
-    print("SeER Training")
+    print("SeER Training (Author's Data)")
     print("=" * 60)
 
-    print("\n[1/7] Loading triplets...")
+    print("\n[1/5] Loading triplets...")
 
     triplets = pd.read_csv(
         TRIPLETS_PATH,
-        sep='\t',
+        sep=" ",
         header=None,
-        names=['user', 'song', 'play_count']
+        names=['user', 'song', 'rating']
     )
 
-    # Optional smaller subset for faster experiments
-    # triplets = triplets.sample(500000, random_state=42)
+    num_users = triplets['user'].max() + 1
+    num_songs = triplets['song'].max() + 1
 
-    print(f"  Loaded {len(triplets)} interactions")
-
-    # ----------------------------------------------------------
-    # MAP SONG IDs -> TRACK IDs
-    # ----------------------------------------------------------
-    # The triplets file uses Echo Nest Song IDs (SO...)
-    # but the MIDI/processed files use MSD Track IDs (TR...).
-    # unique_tracks.txt maps between them:
-    #   TrackID<SEP>SongID<SEP>Artist<SEP>Title
-
-    print("\n[2/8] Mapping Song IDs to Track IDs...")
-
-    song_to_track = {}
-
-    with open(UNIQUE_TRACKS_PATH, 'r', encoding='utf-8') as f:
-        for line in f:
-            parts = line.strip().split('<SEP>')
-            if len(parts) >= 2:
-                track_id, song_id = parts[0], parts[1]
-                song_to_track[song_id] = track_id
-
-    print(f"  Loaded {len(song_to_track)} song-to-track mappings")
-
-    # Map the 'song' column from Song IDs to Track IDs
-    triplets['song'] = triplets['song'].map(song_to_track)
-
-    # Drop rows where the song had no track mapping
-    before = len(triplets)
-    triplets = triplets.dropna(subset=['song'])
-    print(f"  Mapped {len(triplets)}/{before} interactions to Track IDs")
+    print(f"  Interactions: {len(triplets)}")
+    print(f"  Users: {num_users}")
+    print(f"  Songs: {num_songs}")
 
     # ----------------------------------------------------------
-    # LOAD MIDI SEQUENCES
+    # LOAD MIDI ARRAY (author's preprocessed format)
     # ----------------------------------------------------------
 
-    print("\n[3/8] Loading preprocessed MIDI sequences...")
+    print("\n[2/5] Loading MIDI array...")
 
-    song_sequences = {}
+    with open(MIDI_ARRAY_PATH, 'r') as f:
+        midi_array = json.load(f)
 
-    for npy_file in tqdm(os.listdir(PROCESSED_PATH)):
+    midi_array = np.array(midi_array, dtype=np.float32)
 
-        if npy_file.endswith(".npy"):
+    # Truncate to sequence_length * 32 features
+    max_features = SEQUENCE_LENGTH * 32
+    if midi_array.shape[1] > max_features:
+        midi_array = midi_array[:, :max_features]
+    elif midi_array.shape[1] < max_features:
+        # Pad if shorter
+        pad = np.zeros(
+            (midi_array.shape[0], max_features - midi_array.shape[1]),
+            dtype=np.float32
+        )
+        midi_array = np.hstack([midi_array, pad])
 
-            track_id = npy_file.replace(".npy", "")
-
-            sequence = np.load(
-                os.path.join(PROCESSED_PATH, npy_file)
-            )
-
-            song_sequences[track_id] = sequence
-
-    print(f"  Loaded {len(song_sequences)} MIDI tensors")
-
-    # ----------------------------------------------------------
-    # INTERSECTION
-    # ----------------------------------------------------------
-
-    print("\n[4/8] Filtering interactions to songs with MIDI...")
-
-    valid_song_ids = set(song_sequences.keys())
-
-    triplets = triplets[
-        triplets['song'].isin(valid_song_ids)
-    ]
-
-    print(f"  Remaining interactions: {len(triplets)}")
-    print(f"  Remaining songs: {triplets['song'].nunique()}")
+    print(f"  MIDI array shape: {midi_array.shape}")
+    print(f"  Sequence length: {SEQUENCE_LENGTH}")
 
     # ----------------------------------------------------------
-    # FILTER SPARSE USERS
+    # TRAIN / TEST SPLIT (per user)
     # ----------------------------------------------------------
 
-    print("\n[5/8] Filtering inactive users (<20 songs)...")
-
-    user_counts = (
-        triplets.groupby('user')['song']
-        .nunique()
-    )
-
-    active_users = user_counts[
-        user_counts >= 20
-    ].index
-
-    triplets = triplets[
-        triplets['user'].isin(active_users)
-    ]
-
-    print(f"  Remaining users: {triplets['user'].nunique()}")
-    print(f"  Remaining interactions: {len(triplets)}")
-
-    # ----------------------------------------------------------
-    # PLAY COUNT -> RATING
-    # ----------------------------------------------------------
-
-    print("\n  Converting play counts to ratings...")
-
-    triplets['rating'] = triplets['play_count'].apply(
-        playcount_to_rating
-    )
-
-    # ----------------------------------------------------------
-    # ENCODE USERS & SONGS
-    # ----------------------------------------------------------
-
-    print("\n[6/8] Encoding users & songs...")
-
-    encoder_manager = EncoderManager()
-
-    triplets = encoder_manager.fit(triplets)
-
-    num_users = triplets['user_idx'].nunique()
-
-    print(f"  Encoded users: {num_users}")
-
-    # Save encoder for evaluation
-    encoder_manager.save(ENCODER_PATH)
-    print(f"  Encoder saved to {ENCODER_PATH}")
-
-    # ----------------------------------------------------------
-    # TRAIN / TEST SPLIT  (per user, 80/20)
-    # ----------------------------------------------------------
-
-    print("\n[7/8] Splitting data (80/20 per user)...")
+    print("\n[3/5] Splitting data (80/20 per user)...")
 
     np.random.seed(RANDOM_SEED)
 
-    train_rows = []
-    test_rows = []
+    train_users, train_songs, train_ratings = [], [], []
+    test_users, test_songs, test_ratings = [], [], []
 
-    for user_idx, group in triplets.groupby('user_idx'):
+    for user_idx, group in triplets.groupby('user'):
 
         group = group.sample(frac=1, random_state=RANDOM_SEED)
 
@@ -281,24 +160,26 @@ def main():
         test_part = group.iloc[:n_test]
         train_part = group.iloc[n_test:]
 
-        train_rows.append(train_part)
-        test_rows.append(test_part)
+        train_users.extend(train_part['user'].tolist())
+        train_songs.extend(train_part['song'].tolist())
+        train_ratings.extend(train_part['rating'].tolist())
 
-    train_df = pd.concat(train_rows).reset_index(drop=True)
-    test_df = pd.concat(test_rows).reset_index(drop=True)
+        test_users.extend(test_part['user'].tolist())
+        test_songs.extend(test_part['song'].tolist())
+        test_ratings.extend(test_part['rating'].tolist())
 
-    print(f"  Train interactions: {len(train_df)}")
-    print(f"  Test interactions:  {len(test_df)} (held out)")
+    print(f"  Train: {len(train_users)} interactions")
+    print(f"  Test:  {len(test_users)} interactions (held out)")
 
     # ----------------------------------------------------------
-    # DATASET & LOADER  (train split only)
+    # DATASET & LOADER
     # ----------------------------------------------------------
 
-    print("\n  Creating dataset from TRAIN split only...")
+    print("\n[4/5] Creating dataset...")
 
     train_dataset = SeERDataset(
-        train_df,
-        song_sequences
+        train_users, train_songs, train_ratings,
+        midi_array, SEQUENCE_LENGTH
     )
 
     train_loader = DataLoader(
@@ -313,10 +194,9 @@ def main():
     # ----------------------------------------------------------
 
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"\n  Device: {DEVICE}")
 
-    print(f"\n  Using device: {DEVICE}")
-
-    print("\n[8/8] Training model...")
+    print("\n[5/5] Training model...")
 
     model = SeER(
         num_users=num_users
@@ -338,7 +218,6 @@ def main():
         model.train()
 
         total_loss = 0
-
         num_batches = 0
 
         progress_bar = tqdm(
@@ -349,9 +228,7 @@ def main():
         for users, sequences, ratings in progress_bar:
 
             users = users.to(DEVICE)
-
             sequences = sequences.to(DEVICE)
-
             ratings = ratings.to(DEVICE)
 
             # Forward
@@ -364,21 +241,17 @@ def main():
 
             # Backward
             optimizer.zero_grad()
-
             loss.backward()
 
-            # Clip gradients to prevent exploding gradients (common with RNNs)
+            # Clip gradients (standard for RNNs)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             optimizer.step()
 
             total_loss += loss.item()
-
             num_batches += 1
 
-            progress_bar.set_postfix(
-                loss=loss.item()
-            )
+            progress_bar.set_postfix(loss=loss.item())
 
         avg_loss = total_loss / num_batches
 
@@ -398,7 +271,6 @@ def main():
 
     print("\nTraining complete.")
     print(f"Model saved to: {MODEL_SAVE_PATH}")
-    print(f"Encoder saved to: {ENCODER_PATH}")
 
     return model
 

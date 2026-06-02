@@ -1,21 +1,16 @@
 # evaluate_model.py
 #
-# Standalone evaluation script for the trained SeER model.
-#
-# This script loads the SAVED encoder from training (data/encoder.pkl)
-# to guarantee that user/song indices match the trained model weights.
-# It then replicates the exact same 80/20 per-user split used during
-# training (same seed, same logic) so the test set is truly unseen.
+# Evaluation script for the SeER model trained on the author's data.
 #
 # Usage:
 #   python evaluate_model.py
 
 import os
 import sys
+import json
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -24,7 +19,6 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from models.seer import SeER
-from utils.encoders import EncoderManager
 from inference.evaluate import evaluate_model
 
 # ==============================================================
@@ -32,221 +26,135 @@ from inference.evaluate import evaluate_model
 # ==============================================================
 
 DATA_PATH = os.path.join(ROOT_DIR, "data")
-TRIPLETS_PATH = os.path.join(DATA_PATH, "train_triplets.txt")
-UNIQUE_TRACKS_PATH = os.path.join(DATA_PATH, "unique_tracks.txt")
-PROCESSED_PATH = os.path.join(DATA_PATH, "processed")
+TRIPLETS_PATH = os.path.join(DATA_PATH, "triplets.txt")
+MIDI_ARRAY_PATH = os.path.join(DATA_PATH, "midi_array.txt")
 MODEL_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
-ENCODER_PATH = os.path.join(DATA_PATH, "encoder.pkl")
 
 # ==============================================================
-# CONFIG  (must match training/train.py)
+# CONFIG (must match training)
 # ==============================================================
 
+SEQUENCE_LENGTH = 2600
 TEST_RATIO = 0.2
 K = 10
 RANDOM_SEED = 42
 
 # ==============================================================
-# LOAD TRIPLETS
+# LOAD DATA
 # ==============================================================
 
 print("=" * 60)
-print("SeER Model Evaluation")
+print("SeER Model Evaluation (Author's Data)")
 print("=" * 60)
 
-print("\n[1/8] Loading triplets...")
+print("\n[1/6] Loading triplets...")
 
 triplets = pd.read_csv(
     TRIPLETS_PATH,
-    sep='\t',
+    sep=" ",
     header=None,
-    names=['user', 'song', 'play_count']
+    names=['user', 'song', 'rating']
 )
 
-print(f"  Total interactions: {len(triplets)}")
+num_users = triplets['user'].max() + 1
+num_songs = triplets['song'].max() + 1
+
+print(f"  Interactions: {len(triplets)}")
+print(f"  Users: {num_users}")
+print(f"  Songs: {num_songs}")
 
 # ==============================================================
-# MAP SONG IDs -> TRACK IDs
-# ==============================================================
-# The triplets file uses Echo Nest Song IDs (SO...)
-# but the MIDI/processed files use MSD Track IDs (TR...).
-# unique_tracks.txt maps between them:
-#   TrackID<SEP>SongID<SEP>Artist<SEP>Title
-
-print("\n[2/8] Mapping Song IDs to Track IDs...")
-
-song_to_track = {}
-
-with open(UNIQUE_TRACKS_PATH, 'r', encoding='utf-8') as f:
-    for line in f:
-        parts = line.strip().split('<SEP>')
-        if len(parts) >= 2:
-            track_id, song_id = parts[0], parts[1]
-            song_to_track[song_id] = track_id
-
-print(f"  Loaded {len(song_to_track)} song-to-track mappings")
-
-triplets['song'] = triplets['song'].map(song_to_track)
-
-before = len(triplets)
-triplets = triplets.dropna(subset=['song'])
-print(f"  Mapped {len(triplets)}/{before} interactions to Track IDs")
-
-# ==============================================================
-# LOAD MIDI SEQUENCES
+# LOAD MIDI ARRAY
 # ==============================================================
 
-print("\n[3/8] Loading preprocessed MIDI sequences...")
+print("\n[2/6] Loading MIDI array...")
 
-song_sequences = {}
+with open(MIDI_ARRAY_PATH, 'r') as f:
+    midi_array = json.load(f)
 
-for npy_file in tqdm(os.listdir(PROCESSED_PATH), desc="  Loading"):
-    if npy_file.endswith(".npy"):
-        track_id = npy_file.replace(".npy", "")
-        song_sequences[track_id] = np.load(
-            os.path.join(PROCESSED_PATH, npy_file)
-        )
+midi_array = np.array(midi_array, dtype=np.float32)
 
-print(f"  Loaded {len(song_sequences)} MIDI tensors")
+max_features = SEQUENCE_LENGTH * 32
+if midi_array.shape[1] > max_features:
+    midi_array = midi_array[:, :max_features]
+elif midi_array.shape[1] < max_features:
+    pad = np.zeros(
+        (midi_array.shape[0], max_features - midi_array.shape[1]),
+        dtype=np.float32
+    )
+    midi_array = np.hstack([midi_array, pad])
 
-# ==============================================================
-# FILTER (same logic as training)
-# ==============================================================
-
-print("\n[4/8] Filtering data (same rules as training)...")
-
-# Keep only songs that have MIDI
-valid_song_ids = set(song_sequences.keys())
-triplets = triplets[triplets['song'].isin(valid_song_ids)]
-print(f"  After MIDI filter: {len(triplets)} interactions")
-
-# Keep only active users (>= 20 songs)
-user_counts = triplets.groupby('user')['song'].nunique()
-active_users = user_counts[user_counts >= 20].index
-triplets = triplets[triplets['user'].isin(active_users)]
-print(f"  After user filter: {len(triplets)} interactions")
-print(f"  Users: {triplets['user'].nunique()}")
-print(f"  Songs: {triplets['song'].nunique()}")
-
-# Convert play counts to ratings
-def playcount_to_rating(x):
-    if x <= 1:   return 1
-    elif x <= 2: return 2
-    elif x <= 5: return 3
-    elif x <= 10: return 4
-    else:        return 5
-
-triplets['rating'] = triplets['play_count'].apply(playcount_to_rating)
+print(f"  MIDI array shape: {midi_array.shape}")
 
 # ==============================================================
-# LOAD SAVED ENCODER
+# TRAIN / TEST SPLIT (same as training)
 # ==============================================================
 
-print("\n[5/8] Loading saved encoder...")
-
-if not os.path.exists(ENCODER_PATH):
-    print(f"  ERROR: Encoder not found at {ENCODER_PATH}")
-    print("  Please run training first:  python -m training.train")
-    sys.exit(1)
-
-encoder_manager = EncoderManager.load(ENCODER_PATH)
-
-# Use transform() (not fit_transform) to apply the SAME mapping
-# that was learned during training.
-triplets = encoder_manager.transform(triplets)
-
-num_users = triplets['user_idx'].nunique()
-print(f"  Loaded encoder ({num_users} users)")
-
-# ==============================================================
-# TRAIN / TEST SPLIT (same seed & logic as training)
-# ==============================================================
-
-print("\n[6/8] Splitting data (80/20 per user, same seed as training)...")
+print("\n[3/6] Splitting data (80/20 per user, same seed as training)...")
 
 np.random.seed(RANDOM_SEED)
 
-train_rows = []
-test_interactions = defaultdict(list)  # user_idx -> [song_ids]
-test_rows = []
+test_interactions = defaultdict(list)  # user_idx -> [song_idxs]
+test_users, test_songs, test_ratings = [], [], []
 
-for user_idx, group in triplets.groupby('user_idx'):
+for user_idx, group in triplets.groupby('user'):
 
     group = group.sample(frac=1, random_state=RANDOM_SEED)
 
     n_test = max(1, int(len(group) * TEST_RATIO))
 
     test_part = group.iloc[:n_test]
-    train_part = group.iloc[n_test:]
-
-    train_rows.append(train_part)
-    test_rows.append(test_part)
 
     for _, row in test_part.iterrows():
-        test_interactions[user_idx].append(row['song'])
+        test_interactions[row['user']].append(row['song'])
+        test_users.append(row['user'])
+        test_songs.append(row['song'])
+        test_ratings.append(row['rating'])
 
-train_df = pd.concat(train_rows).reset_index(drop=True)
-test_df = pd.concat(test_rows).reset_index(drop=True)
-
-print(f"  Train interactions: {len(train_df)}")
-print(f"  Test interactions:  {len(test_df)}")
-print(f"  Test users:         {len(test_interactions)}")
+print(f"  Test interactions: {len(test_users)}")
+print(f"  Test users: {len(test_interactions)}")
 
 # ==============================================================
 # LOAD MODEL
 # ==============================================================
 
-print("\n[7/8] Loading trained model...")
+print("\n[4/6] Loading trained model...")
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"  Device: {DEVICE}")
 
-# Infer num_users from saved weights (robust even if data changes)
 state_dict = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
 saved_num_users = state_dict['user_embedding.weight'].shape[0]
 
 model = SeER(num_users=saved_num_users).to(DEVICE)
 model.load_state_dict(state_dict)
+model.eval()
 
-print(f"  Loaded weights from {MODEL_PATH}")
+print(f"  Loaded from {MODEL_PATH}")
 print(f"  Model num_users: {saved_num_users}")
 
-if saved_num_users != num_users:
-    print(f"  WARNING: Model was trained with {saved_num_users} users "
-          f"but current data has {num_users} users.")
-    print("  This may indicate a data mismatch. Re-train recommended.")
-
 # ==============================================================
-# REGRESSION METRICS (RMSE, MAE on test set)
+# REGRESSION METRICS (RMSE, MAE)
 # ==============================================================
 
-print("\n[8/8] Computing metrics...")
-
-print("\n--- Regression Metrics (on test set) ---")
-
-model.eval()
+print("\n[5/6] Computing regression metrics...")
 
 all_preds = []
 all_true = []
 
 with torch.no_grad():
-    for _, row in tqdm(test_df.iterrows(), total=len(test_df),
-                       desc="  RMSE/MAE"):
+    for i in tqdm(range(len(test_users)), desc="  RMSE/MAE"):
 
-        user_idx = int(row['user_idx'])
-        song_id = row['song']
-        true_rating = row['rating']
+        user_idx = test_users[i]
+        song_idx = test_songs[i]
+        true_rating = test_ratings[i]
 
-        seq = song_sequences.get(song_id)
-        if seq is None:
-            continue
+        # Reshape song features for the GRU
+        flat = midi_array[song_idx]
+        sequence = flat.reshape(SEQUENCE_LENGTH, 32)
 
         user_t = torch.tensor([user_idx], dtype=torch.long).to(DEVICE)
-        seq_t = (
-            torch.tensor(seq, dtype=torch.float32)
-            .unsqueeze(0)
-            .to(DEVICE)
-        )
+        seq_t = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
         pred = model(user_t, seq_t).item()
 
@@ -263,10 +171,20 @@ print(f"\n  RMSE : {rmse:.4f}")
 print(f"  MAE  : {mae:.4f}")
 
 # ==============================================================
-# RANKING METRICS (MAP@K, Precision@K, Recall@K, NDCG@K)
+# RANKING METRICS
 # ==============================================================
 
-print(f"\n--- Ranking Metrics @ K={K} ---")
+print(f"\n[6/6] Computing ranking metrics @ K={K}...")
+
+# Build song_sequences dict for the evaluate_model function
+# Only include songs that appear in the interaction data
+interaction_songs = set(triplets['song'].unique())
+song_sequences = {}
+for song_idx in interaction_songs:
+    flat = midi_array[int(song_idx)]
+    song_sequences[song_idx] = flat.reshape(SEQUENCE_LENGTH, 32)
+
+print(f"  Candidate pool: {len(song_sequences)} songs")
 
 metrics, per_user = evaluate_model(
     model=model,
