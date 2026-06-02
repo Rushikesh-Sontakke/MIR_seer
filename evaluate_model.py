@@ -34,7 +34,7 @@ MODEL_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
 # CONFIG (must match training)
 # ==============================================================
 
-SEQUENCE_LENGTH = 2600
+SEQUENCE_LENGTH = 500
 TEST_RATIO = 0.2
 K = 10
 RANDOM_SEED = 42

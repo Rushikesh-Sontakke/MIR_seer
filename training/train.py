@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+from collections import defaultdict
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
@@ -42,9 +43,9 @@ MODEL_SAVE_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
 # ==============================================================
 
 SEQUENCE_LENGTH = 500       # median MIDI length from the paper
-BATCH_SIZE = 200              # 500 in the paper, use 32 if GPU memory is limited
+BATCH_SIZE = 500              # 500 in the paper
 LEARNING_RATE = 1e-3
-EPOCHS = 10
+EPOCHS = 20
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
 
@@ -55,25 +56,41 @@ RANDOM_SEED = 42
 
 class SeERDataset(Dataset):
 
-    def __init__(self, users, songs, ratings, midi_array, sequence_length):
+    def __init__(self, users, songs, ratings, midi_array, sequence_length, num_songs=None, user_positives=None, num_negatives=0):
 
         self.users = users
         self.songs = songs
         self.ratings = ratings
         self.midi_array = midi_array
         self.seq_len = sequence_length
+        self.num_songs = num_songs
+        self.user_positives = user_positives
+        self.num_negatives = num_negatives
+        self.length = len(self.users) * (1 + self.num_negatives)
 
     def __len__(self):
-        return len(self.users)
+        return self.length
 
     def __getitem__(self, idx):
 
-        user_idx = self.users[idx]
-        song_idx = self.songs[idx]
-        rating = self.ratings[idx]
+        if idx < len(self.users):
+            user_idx = self.users[idx]
+            song_idx = self.songs[idx]
+            rating = self.ratings[idx]
+        else:
+            # Negative sampling
+            pos_idx = idx % len(self.users)
+            user_idx = self.users[pos_idx]
+            rating = 0.0
+            
+            # Sample a random song not in user_positives
+            song_idx = np.random.randint(0, self.num_songs)
+            if self.user_positives is not None:
+                while song_idx in self.user_positives[user_idx]:
+                    song_idx = np.random.randint(0, self.num_songs)
 
         # The midi_array is flattened: (num_songs, seq_len * 32)
-        # Reshape the song's row into (seq_len, 32) for the GRU
+        # Reshape the song's row into (seq_len, 32)
         flat_features = self.midi_array[song_idx]
         sequence = flat_features.reshape(self.seq_len, 32)
 
@@ -171,6 +188,14 @@ def main():
     print(f"  Train: {len(train_users)} interactions")
     print(f"  Test:  {len(test_users)} interactions (held out)")
 
+    print("\n  Building negative sampling pool...")
+    user_positives = defaultdict(set)
+    for u, s in zip(train_users, train_songs):
+        user_positives[u].add(s)
+    # Exclude test songs from negative sampling pool to avoid data leakage
+    for u, s in zip(test_users, test_songs):
+        user_positives[u].add(s)
+
     # ----------------------------------------------------------
     # DATASET & LOADER
     # ----------------------------------------------------------
@@ -179,13 +204,28 @@ def main():
 
     train_dataset = SeERDataset(
         train_users, train_songs, train_ratings,
-        midi_array, SEQUENCE_LENGTH
+        midi_array, SEQUENCE_LENGTH,
+        num_songs=num_songs,
+        user_positives=user_positives,
+        num_negatives=1
     )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
+        num_workers=0
+    )
+
+    test_dataset = SeERDataset(
+        test_users, test_songs, test_ratings,
+        midi_array, SEQUENCE_LENGTH
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
         num_workers=0
     )
 
@@ -212,6 +252,8 @@ def main():
     # ----------------------------------------------------------
     # TRAINING LOOP
     # ----------------------------------------------------------
+
+    best_val_loss = float('inf')
 
     for epoch in range(EPOCHS):
 
@@ -257,20 +299,42 @@ def main():
 
         print(
             f"\nEpoch {epoch + 1} "
-            f"Average Loss: {avg_loss:.4f}\n"
+            f"Average Train Loss: {avg_loss:.4f}"
         )
 
-    # ----------------------------------------------------------
-    # SAVE MODEL
-    # ----------------------------------------------------------
+        # ----------------------------------------------------------
+        # VALIDATION
+        # ----------------------------------------------------------
+        model.eval()
+        val_loss = 0
+        val_batches = 0
 
-    torch.save(
-        model.state_dict(),
-        MODEL_SAVE_PATH
-    )
+        with torch.no_grad():
+            for users, sequences, ratings in test_loader:
+                users = users.to(DEVICE)
+                sequences = sequences.to(DEVICE)
+                ratings = ratings.to(DEVICE)
+
+                predictions = model(users, sequences)
+                loss = criterion(predictions.squeeze(), ratings)
+
+                val_loss += loss.item()
+                val_batches += 1
+
+        avg_val_loss = val_loss / val_batches
+        print(f"Epoch {epoch + 1} Average Val Loss: {avg_val_loss:.4f}")
+
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            print(f"  -> Best model so far! Saving to {MODEL_SAVE_PATH}\n")
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        else:
+            print("")
 
     print("\nTraining complete.")
-    print(f"Model saved to: {MODEL_SAVE_PATH}")
+    print(f"Best Val Loss: {best_val_loss:.4f}")
+    print(f"Best model saved to: {MODEL_SAVE_PATH}")
 
     return model
 
