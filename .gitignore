@@ -1,0 +1,6 @@
+data/
+*.zip
+*.tar.gz
+*.pt
+*.pth
+*.ckpt
