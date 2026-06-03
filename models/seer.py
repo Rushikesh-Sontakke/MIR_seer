@@ -18,31 +18,34 @@ class SeER(nn.Module):
 
         self.user_embedding = nn.Embedding(num_users, latent_dim)
 
-        self.gru = nn.GRU(
+        self.dropout = nn.Dropout(0.2)
+
+        self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True
         )
 
+        self.prediction = nn.Linear(latent_dim + hidden_size, 1)
+
     def encode_songs(self, song_sequences):
-        """Run the GRU on song sequences and return the song vectors.
-
-        Normalizes inputs before passing through the GRU.
-        Use this instead of calling self.gru directly.
-        """
-
+        """Run the LSTM on song sequences and return the song vectors."""
         normed = (song_sequences / self.INPUT_SCALE).float()
+        normed = self.dropout(normed)
 
-        _, hidden = self.gru(normed)
+        # LSTM returns (output, (h_n, c_n))
+        _, (hidden, _) = self.lstm(normed)
 
         return hidden.squeeze(0)
 
     def forward(self, user_ids, song_sequences):
-
         user_vec = self.user_embedding(user_ids)
-
         song_vec = self.encode_songs(song_sequences)
 
-        prediction = torch.sum(user_vec * song_vec, dim=1)
+        # Concatenate user and song vectors (Author's architecture)
+        concat = torch.cat([user_vec, song_vec], dim=1)
+
+        # Dense layer to predict rating
+        prediction = self.prediction(concat)
 
         return prediction

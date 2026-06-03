@@ -45,7 +45,7 @@ MODEL_INFO_PATH = os.path.join(ROOT_DIR, "seer_model_info.json")
 
 SEQUENCE_LENGTH = 500       # median MIDI length from the paper
 BATCH_SIZE = 500              # 500 in the paper
-LEARNING_RATE = 1e-3
+LEARNING_RATE =  3e-4
 EPOCHS = 15
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
@@ -57,38 +57,22 @@ RANDOM_SEED = 42
 
 class SeERDataset(Dataset):
 
-    def __init__(self, users, songs, ratings, midi_array, sequence_length, num_songs=None, user_positives=None, num_negatives=0):
+    def __init__(self, users, songs, ratings, midi_array, sequence_length):
 
         self.users = users
         self.songs = songs
         self.ratings = ratings
         self.midi_array = midi_array
         self.seq_len = sequence_length
-        self.num_songs = num_songs
-        self.user_positives = user_positives
-        self.num_negatives = num_negatives
-        self.length = len(self.users) * (1 + self.num_negatives)
 
     def __len__(self):
-        return self.length
+        return len(self.users)
 
     def __getitem__(self, idx):
 
-        if idx < len(self.users):
-            user_idx = self.users[idx]
-            song_idx = self.songs[idx]
-            rating = self.ratings[idx]
-        else:
-            # Negative sampling
-            pos_idx = idx % len(self.users)
-            user_idx = self.users[pos_idx]
-            rating = 0.0
-            
-            # Sample a random song not in user_positives
-            song_idx = np.random.randint(0, self.num_songs)
-            if self.user_positives is not None:
-                while song_idx in self.user_positives[user_idx]:
-                    song_idx = np.random.randint(0, self.num_songs)
+        user_idx = self.users[idx]
+        song_idx = self.songs[idx]
+        rating = self.ratings[idx]
 
         # The midi_array is flattened: (num_songs, seq_len * 32)
         # Reshape the song's row into (seq_len, 32)
@@ -189,14 +173,6 @@ def main():
     print(f"  Train: {len(train_users)} interactions")
     print(f"  Test:  {len(test_users)} interactions (held out)")
 
-    print("\n  Building negative sampling pool...")
-    user_positives = defaultdict(set)
-    for u, s in zip(train_users, train_songs):
-        user_positives[u].add(s)
-    # Exclude test songs from negative sampling pool to avoid data leakage
-    for u, s in zip(test_users, test_songs):
-        user_positives[u].add(s)
-
     # ----------------------------------------------------------
     # DATASET & LOADER
     # ----------------------------------------------------------
@@ -205,10 +181,7 @@ def main():
 
     train_dataset = SeERDataset(
         train_users, train_songs, train_ratings,
-        midi_array, SEQUENCE_LENGTH,
-        num_songs=num_songs,
-        user_positives=user_positives,
-        num_negatives=1
+        midi_array, SEQUENCE_LENGTH
     )
 
     train_loader = DataLoader(
@@ -360,4 +333,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()  

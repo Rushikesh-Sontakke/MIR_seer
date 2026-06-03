@@ -194,12 +194,34 @@ def evaluate_model(model,
     print(f"  User matrix: {user_matrix.shape}")
 
     # ----------------------------------------------------------
-    # STEP 3: Score all (user, song) pairs via matrix multiply
+    # STEP 3: Score all (user, song) pairs via Dense layer
     # ----------------------------------------------------------
     print(f"  Computing score matrix ({num_users} users × {num_songs} songs)...")
 
-    # (num_users, num_songs) = (num_users, latent) @ (latent, num_songs)
-    score_matrix = torch.mm(user_matrix, song_matrix.t()).numpy()
+    score_matrix = np.zeros((num_users, num_songs), dtype=np.float32)
+    
+    # Process in batches of users to avoid out-of-memory errors
+    USER_BATCH = 500
+    for start_idx in range(0, num_users, USER_BATCH):
+        end_idx = min(start_idx + USER_BATCH, num_users)
+        
+        u_batch = user_matrix[start_idx:end_idx].to(device)  # (batch, 150)
+        
+        # Expand user vectors to match all songs: (batch, num_songs, 150)
+        u_expanded = u_batch.unsqueeze(1).expand(-1, num_songs, -1)
+        
+        # Expand song vectors to match all users in batch: (batch, num_songs, 150)
+        s_expanded = song_matrix.to(device).unsqueeze(0).expand(end_idx - start_idx, -1, -1)
+        
+        # Concatenate: (batch, num_songs, 300)
+        concat = torch.cat([u_expanded, s_expanded], dim=2)
+        
+        # Pass through model's dense layer: (batch, num_songs)
+        preds = model.prediction(concat).squeeze(-1)
+        
+        score_matrix[start_idx:end_idx] = preds.cpu().numpy()
+        
+        torch.cuda.empty_cache()
 
     # ----------------------------------------------------------
     # STEP 4: Rank and compute metrics per user

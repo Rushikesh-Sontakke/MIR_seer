@@ -170,36 +170,162 @@ mae = np.mean(np.abs(all_preds - all_true))
 print(f"\n  RMSE : {rmse:.4f}")
 print(f"  MAE  : {mae:.4f}")
 
+# # ==============================================================
+# # RANKING METRICS
+# # ==============================================================
+
+# print(f"\n[6/6] Computing ranking metrics @ K={K}...")
+
+# # Build song_sequences dict for the evaluate_model function
+# # Only include songs that appear in the interaction data
+# interaction_songs = set(triplets['song'].unique())
+# song_sequences = {}
+# for song_idx in interaction_songs:
+#     flat = midi_array[int(song_idx)]
+#     song_sequences[song_idx] = flat.reshape(SEQUENCE_LENGTH, 32)
+
+# print(f"  Candidate pool: {len(song_sequences)} songs")
+
+# metrics, per_user = evaluate_model(
+#     model=model,
+#     test_interactions=test_interactions,
+#     song_sequences=song_sequences,
+#     device=DEVICE,
+#     k=K
+# )
+
+# print(f"\n{'=' * 40}")
+# print(f"  Precision@{K} : {metrics[f'precision@{K}']:.4f}")
+# print(f"  Recall@{K}    : {metrics[f'recall@{K}']:.4f}")
+# print(f"  MAP@{K}       : {metrics[f'map@{K}']:.4f}")
+# print(f"  NDCG@{K}      : {metrics[f'ndcg@{K}']:.4f}")
+# print(f"  Users evaluated: {metrics['num_users_evaluated']}")
+# print(f"{'=' * 40}")
+
+# print("\nEvaluation complete.")
 # ==============================================================
-# RANKING METRICS
+# AUTHOR-STYLE RANKING METRICS
 # ==============================================================
 
-print(f"\n[6/6] Computing ranking metrics @ K={K}...")
+print(f"\n[6/6] Computing ranking metrics (author style)...")
 
-# Build song_sequences dict for the evaluate_model function
-# Only include songs that appear in the interaction data
-interaction_songs = set(triplets['song'].unique())
-song_sequences = {}
-for song_idx in interaction_songs:
-    flat = midi_array[int(song_idx)]
-    song_sequences[song_idx] = flat.reshape(SEQUENCE_LENGTH, 32)
+INTERACTION_THRESHOLD = 3
 
-print(f"  Candidate pool: {len(song_sequences)} songs")
+pred_df = pd.DataFrame({
+    "user": test_users,
+    "song": test_songs,
+    "rating": all_preds,
+    "true": all_true
+})
 
-metrics, per_user = evaluate_model(
-    model=model,
-    test_interactions=test_interactions,
-    song_sequences=song_sequences,
-    device=DEVICE,
-    k=K
+pred_df["relevant"] = (
+    pred_df["true"] >= INTERACTION_THRESHOLD
+).astype(int)
+
+pred_df["rank"] = (
+    pred_df.groupby("user")["rating"]
+    .rank(method="first", ascending=False)
 )
 
-print(f"\n{'=' * 40}")
-print(f"  Precision@{K} : {metrics[f'precision@{K}']:.4f}")
-print(f"  Recall@{K}    : {metrics[f'recall@{K}']:.4f}")
-print(f"  MAP@{K}       : {metrics[f'map@{K}']:.4f}")
-print(f"  NDCG@{K}      : {metrics[f'ndcg@{K}']:.4f}")
-print(f"  Users evaluated: {metrics['num_users_evaluated']}")
-print(f"{'=' * 40}")
+pred_df["rank_true"] = (
+    pred_df.groupby("user")["true"]
+    .rank(method="first", ascending=False)
+)
 
-print("\nEvaluation complete.")
+pred_df.sort_values(
+    ["user", "rank"],
+    inplace=True
+)
+
+# --------------------------------------------------------------
+# MAP@K
+# --------------------------------------------------------------
+
+def map_at_k(pred_df, k=10):
+
+    AP = 0.0
+
+    for user in pred_df["user"].unique():
+
+        user_df = pred_df[pred_df["user"] == user]
+
+        top_items = user_df["relevant"].values[:k]
+
+        p_list = []
+
+        for j in range(1, len(top_items) + 1):
+
+            prefix = top_items[:j]
+
+            precision_j = np.sum(prefix) / len(prefix)
+
+            p_list.append(precision_j)
+
+        p_list = np.array(p_list)
+
+        sum_val = np.sum(p_list * top_items)
+
+        num_relevant = np.sum(user_df["relevant"])
+
+        if num_relevant > 0:
+            AP += sum_val / num_relevant
+
+    return AP / pred_df["user"].nunique()
+
+
+# --------------------------------------------------------------
+# NDCG@K
+# --------------------------------------------------------------
+
+def ndcg_at_k(pred_df, k=10):
+
+    topk_true = pred_df[
+        pred_df["rank_true"] <= k
+    ].copy()
+
+    topk_true["idcg_unit"] = topk_true[
+        "rank_true"
+    ].apply(
+        lambda x: np.log(2) / np.log(1 + x)
+    )
+
+    topk_true["idcg"] = (
+        topk_true.groupby("user")["idcg_unit"]
+        .transform("sum")
+    )
+
+    test_topk = topk_true[
+        topk_true["rank"] <= k
+    ].copy()
+
+    test_topk["dcg_unit"] = test_topk[
+        "rank"
+    ].apply(
+        lambda x: np.log(2) / np.log(1 + x)
+    )
+
+    test_topk["dcg"] = (
+        test_topk.groupby("user")["dcg_unit"]
+        .transform("sum")
+    )
+
+    test_topk["ndcg"] = (
+        test_topk["dcg"] /
+        test_topk["idcg"]
+    )
+
+    return (
+        np.sum(
+            test_topk.groupby("user")["ndcg"].max()
+        )
+        / pred_df["user"].nunique()
+    )
+
+
+map10 = map_at_k(pred_df, K)
+ndcg10 = ndcg_at_k(pred_df, K)
+
+print(f"\n{'=' * 40}")
+print(f"  MAP@{K}  : {map10:.4f}")
+print(f"  NDCG@{K} : {ndcg10:.4f}")
+print(f"{'=' * 40}")
