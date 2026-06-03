@@ -37,6 +37,7 @@ TRIPLETS_PATH = os.path.join(DATA_PATH, "triplets.txt")
 MIDI_ARRAY_PATH = os.path.join(DATA_PATH, "midi_array.txt")
 
 MODEL_SAVE_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
+MODEL_INFO_PATH = os.path.join(ROOT_DIR, "seer_model_info.json")
 
 # ==============================================================
 # HYPERPARAMETERS
@@ -44,7 +45,7 @@ MODEL_SAVE_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
 
 SEQUENCE_LENGTH = 500       # median MIDI length from the paper
 BATCH_SIZE = 500              # 500 in the paper
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 3e-4
 EPOCHS = 20
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
@@ -253,7 +254,18 @@ def main():
     # TRAINING LOOP
     # ----------------------------------------------------------
 
-    best_val_loss = float('inf')
+    current_run_best_loss = float('inf')
+    global_best_loss = float('inf')
+
+    if os.path.exists(MODEL_INFO_PATH):
+        try:
+            with open(MODEL_INFO_PATH, 'r') as f:
+                info = json.load(f)
+                global_best_loss = info.get('best_val_loss', float('inf'))
+            print(f"\n[!] Found previous best model with Val Loss: {global_best_loss:.4f}")
+            print(f"[!] Will only overwrite {MODEL_SAVE_PATH} if we beat this score.\n")
+        except:
+            pass
 
     for epoch in range(EPOCHS):
 
@@ -324,17 +336,25 @@ def main():
         avg_val_loss = val_loss / val_batches
         print(f"Epoch {epoch + 1} Average Val Loss: {avg_val_loss:.4f}")
 
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            print(f"  -> Best model so far! Saving to {MODEL_SAVE_PATH}\n")
-            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        # Track best for current run
+        if avg_val_loss < current_run_best_loss:
+            current_run_best_loss = avg_val_loss
+            
+            # Compare to global best across all runs
+            if avg_val_loss < global_best_loss:
+                global_best_loss = avg_val_loss
+                print(f"  -> 🌟 NEW GLOBAL BEST! Overwriting {MODEL_SAVE_PATH}\n")
+                torch.save(model.state_dict(), MODEL_SAVE_PATH)
+                with open(MODEL_INFO_PATH, 'w') as f:
+                    json.dump({"best_val_loss": global_best_loss}, f)
+            else:
+                print(f"  -> Best this run, but previous run was better ({global_best_loss:.4f}). Not overwriting.\n")
         else:
             print("")
 
     print("\nTraining complete.")
-    print(f"Best Val Loss: {best_val_loss:.4f}")
-    print(f"Best model saved to: {MODEL_SAVE_PATH}")
+    print(f"Best Val Loss this run: {current_run_best_loss:.4f}")
+    print(f"All-time Best Val Loss: {global_best_loss:.4f}")
 
     return model
 
