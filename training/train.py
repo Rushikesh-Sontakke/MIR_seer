@@ -44,9 +44,9 @@ MODEL_INFO_PATH = os.path.join(ROOT_DIR, "seer_model_info.json")
 # ==============================================================
 
 SEQUENCE_LENGTH = 500       # median MIDI length from the paper
-BATCH_SIZE = 500              # 500 in the paper
-LEARNING_RATE = 3e-4
-EPOCHS = 20
+BATCH_SIZE = 256              # 500 in the paper
+LEARNING_RATE = 1e-3
+EPOCHS = 15
 TEST_RATIO = 0.2
 RANDOM_SEED = 42
 
