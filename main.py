@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import torch
 from tqdm import tqdm
+import pandas as pd
 
 ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 if ROOT_DIR not in sys.path:
@@ -51,14 +52,78 @@ print("Loading song sequences...")
 song_sequences = {}
 
 for npy_file in tqdm(os.listdir(PROCESSED_PATH)):
+
     if npy_file.endswith(".npy"):
+
         track_id = npy_file.replace(".npy", "")
+
         song_sequences[track_id] = np.load(
             os.path.join(PROCESSED_PATH, npy_file)
         )
 
 print(f"Loaded {len(song_sequences)} songs")
 
+# ==============================================================
+# FILTER TO THE 6442-SONG TRAINING CATALOG
+# ==============================================================
+
+print("\nLoading training song catalog...")
+
+song_mapping = pd.read_csv(
+    os.path.join(DATA_PATH, "song_to_number_matching.csv")
+)
+
+allowed_song_ids = set(song_mapping["song_id"])
+
+print(
+    f"Songs in training catalog: "
+    f"{len(allowed_song_ids)}"
+)
+
+song_to_track = {}
+
+with open(
+    os.path.join(DATA_PATH, "unique_tracks.txt"),
+    "r",
+    encoding="utf-8"
+) as f:
+
+    for line in f:
+
+        parts = line.strip().split("<SEP>")
+
+        if len(parts) < 2:
+            continue
+
+        track_id = parts[0]
+        song_id = parts[1]
+
+        song_to_track[song_id] = track_id
+
+allowed_track_ids = set()
+
+for song_id in allowed_song_ids:
+
+    if song_id in song_to_track:
+        allowed_track_ids.add(
+            song_to_track[song_id]
+        )
+
+print(
+    f"Matched training tracks: "
+    f"{len(allowed_track_ids)}"
+)
+
+song_sequences = {
+    track_id: sequence
+    for track_id, sequence in song_sequences.items()
+    if track_id in allowed_track_ids
+}
+
+print(
+    f"Filtered catalog size: "
+    f"{len(song_sequences)} songs"
+)
 # ==============================================================
 # RECOMMEND
 # ==============================================================
