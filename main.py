@@ -1,11 +1,12 @@
 # main.py
 #
 # Quick inference entry point.
-# Loads the trained model from seer_model.pth and the saved encoder,
-# then generates top-K recommendations for a given user.
+# Loads the trained model from seer_model.pth and author midi_array.txt
+# (500 × 32 per song — must match training / evaluate_model.py).
 
 import os
 import sys
+import json
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -16,17 +17,19 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from models.seer import SeER
-from utils.encoders import EncoderManager
 from inference.recommend import recommend_top_k
+
+# Must match training/train.py and evaluate_model.py
+SEQUENCE_LENGTH = 500
+FEATURES = 32
 
 # ==============================================================
 # PATHS
 # ==============================================================
 
 DATA_PATH = os.path.join(ROOT_DIR, "data")
-PROCESSED_PATH = os.path.join(DATA_PATH, "processed")
 MODEL_PATH = os.path.join(ROOT_DIR, "seer_model.pth")
-ENCODER_PATH = os.path.join(DATA_PATH, "encoder.pkl")
+MIDI_ARRAY_PATH = os.path.join(DATA_PATH, "midi_array.txt")
 
 # ==============================================================
 # LOAD MODEL
@@ -44,98 +47,75 @@ model.eval()
 print(f"Model loaded ({num_users} users, device={DEVICE})")
 
 # ==============================================================
-# LOAD SONG SEQUENCES
+# LOAD SONG SEQUENCES (author midi_array — same as training)
 # ==============================================================
 
-print("Loading song sequences...")
+print("Loading song sequences from midi_array.txt...")
 
-song_sequences = {}
+with open(MIDI_ARRAY_PATH, 'r') as f:
+    midi_array = json.load(f)
 
-for npy_file in tqdm(os.listdir(PROCESSED_PATH)):
+midi_array = np.array(midi_array, dtype=np.float32)
 
-    if npy_file.endswith(".npy"):
+max_features = SEQUENCE_LENGTH * FEATURES
+if midi_array.shape[1] > max_features:
+    midi_array = midi_array[:, :max_features]
+elif midi_array.shape[1] < max_features:
+    pad = np.zeros(
+        (midi_array.shape[0], max_features - midi_array.shape[1]),
+        dtype=np.float32
+    )
+    midi_array = np.hstack([midi_array, pad])
 
-        track_id = npy_file.replace(".npy", "")
-
-        song_sequences[track_id] = np.load(
-            os.path.join(PROCESSED_PATH, npy_file)
-        )
-
-print(f"Loaded {len(song_sequences)} songs")
-
-# ==============================================================
-# FILTER TO THE 6442-SONG TRAINING CATALOG
-# ==============================================================
-
-print("\nLoading training song catalog...")
+print(f"  MIDI array shape: {midi_array.shape}")
 
 song_mapping = pd.read_csv(
     os.path.join(DATA_PATH, "song_to_number_matching.csv")
 )
 
-allowed_song_ids = set(song_mapping["song_id"])
-
-print(
-    f"Songs in training catalog: "
-    f"{len(allowed_song_ids)}"
-)
-
 song_to_track = {}
-
 with open(
     os.path.join(DATA_PATH, "unique_tracks.txt"),
     "r",
     encoding="utf-8"
 ) as f:
-
     for line in f:
-
         parts = line.strip().split("<SEP>")
-
         if len(parts) < 2:
             continue
+        song_to_track[parts[1]] = parts[0]
 
-        track_id = parts[0]
-        song_id = parts[1]
+song_sequences = {}
 
-        song_to_track[song_id] = track_id
+for _, row in tqdm(song_mapping.iterrows(), total=len(song_mapping)):
 
-allowed_track_ids = set()
+    song_idx = int(row["number"])
+    song_id = row["song_id"]
 
-for song_id in allowed_song_ids:
+    if song_id not in song_to_track:
+        continue
 
-    if song_id in song_to_track:
-        allowed_track_ids.add(
-            song_to_track[song_id]
-        )
+    track_id = song_to_track[song_id]
+    flat = midi_array[song_idx]
+    song_sequences[track_id] = flat.reshape(SEQUENCE_LENGTH, FEATURES)
 
-print(
-    f"Matched training tracks: "
-    f"{len(allowed_track_ids)}"
-)
+print(f"Loaded {len(song_sequences)} songs (500 timesteps each)")
 
-song_sequences = {
-    track_id: sequence
-    for track_id, sequence in song_sequences.items()
-    if track_id in allowed_track_ids
-}
-
-print(
-    f"Filtered catalog size: "
-    f"{len(song_sequences)} songs"
-)
 # ==============================================================
 # RECOMMEND
 # ==============================================================
 
+USER_ID = 0
+K = 5
+
 recommendations = recommend_top_k(
     model=model,
-    user_id=0,
+    user_id=USER_ID,
     song_sequences=song_sequences,
     device=DEVICE,
-    k=5
+    k=K
 )
 
-print("\nTop 5 recommendations for user 0:")
-for rank, (song_id, score) in enumerate(recommendations, 1):
-    print(f"  {rank}. {song_id}  (score: {score:.4f})")
+print(f"\nTop {K} recommendations for user {USER_ID}:")
+for rank, (track_id, score) in enumerate(recommendations, 1):
+    print(f"  {rank}. {track_id}  (score: {score:.4f})")
