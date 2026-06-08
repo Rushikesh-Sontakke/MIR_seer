@@ -1,11 +1,33 @@
-data/
-*.zip
-*.tar.gz
-*.pt
-*.pth
-*.ckpt
+# Data files (too large for git)
+data/midi_array.txt
+data/Time_array.txt
+data/train_triplets.txt
+data/train_triplets.txt.zip
+data/lmd_matched.tar.gz
+data/lmd_matched/
+data/processed/
+data/encoder.pkl
+data/match_scores.json
+data/midicsv.tar.gz
 
+# Model weights
+*.pth
+
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+.code-review-graph/

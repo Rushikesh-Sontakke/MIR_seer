@@ -28,10 +28,29 @@ LMD_PATH = os.path.join(ROOT_DIR, "data", "lmd_matched")
 
 
 def find_midi_for_track(track_id):
-    """Lakh MIDI layout: data/lmd_matched/<TRACK_ID>/*.mid"""
-
-    pattern = os.path.join(LMD_PATH, track_id, "*.mid*")
+    """Lakh MIDI layout: data/lmd_matched/lmd_matched/A/B/C/<TRACK_ID>/*.mid"""
+    
+    if len(track_id) < 5:
+        return None
+        
+    # The Lakh MIDI dataset nests files based on the 3rd, 4th, and 5th characters of the track ID
+    folder_a = track_id[2]
+    folder_b = track_id[3]
+    folder_c = track_id[4]
+    
+    # Handle the fact that it might be extracted into a nested 'lmd_matched' folder
+    lmd_base = LMD_PATH
+    if os.path.isdir(os.path.join(LMD_PATH, "lmd_matched")):
+        lmd_base = os.path.join(LMD_PATH, "lmd_matched")
+        
+    pattern = os.path.join(lmd_base, folder_a, folder_b, folder_c, track_id, "*.mid*")
     matches = glob.glob(pattern)
+    
+    # Fallback to the flat structure just in case
+    if not matches:
+        pattern = os.path.join(LMD_PATH, track_id, "*.mid*")
+        matches = glob.glob(pattern)
+        
     if not matches:
         return None
     return matches[0]
